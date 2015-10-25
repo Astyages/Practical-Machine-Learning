@@ -1,0 +1,148 @@
+---
+title: "Machine Learning Course Project"
+author: "N. G. Schwarz Iglesias"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE)
+knitr::opts_chunk$set(warning=FALSE)
+options(scipen = 2, digits = 4)
+```
+
+```{r Starting up}
+### 
+
+#downloading and reading file
+trainURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+dest <- "C:/Users/aranay/Dropbox/DataScience/MachineLearning/CourseProject/training.csv"
+download.file(trainURL, dest)
+TRAIN <- read.csv(dest)
+
+#libraries
+library(caret)
+library(randomForest)
+```
+
+## Objective
+
+In this project, 6 participants were asked to perform barbell lifts correctly and incorrectly in 5 different ways. The goal is to use data from accelerometers on their belt, forearm, arm, and dumbell of 6 participants to predict the manner in which they did the exercise ("*classe*" variable). 
+
+## *Classe* Variable Description
+
+Six young health participants (with little weight lifting experience) were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl (1.25kg) in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. [Read more: Qualitative Activity Recognition of Weight Lifting Exercises](http://groupware.les.inf.puc-rio.br/har#ixzz3mysefeQu) 
+
+## Cleaning and Exploring Data
+
+```{r Data Cleaning}
+### 
+# Empty factor variables are identified and subsetted from the training dataset.
+factorCols <- colnames(TRAIN[, sapply(TRAIN, is.factor)])
+ok.factor <- which(factorCols %in% c("user_name", "cvtd_timestamp", 
+                                     "new_window", "classe"))
+factorCols <- factorCols[-ok.factor]
+TRAIN <- subset(TRAIN, select = as.logical(colnames(TRAIN) %in% factorCols - 1))
+
+# Empty numeric variables are identified and subsetted from the training dataset.
+TRAIN <- subset(TRAIN, select = as.logical(sapply(TRAIN, anyNA) - 1))
+
+# Most functions and models need variables to be numeric, so integer vars will
+# be changed.
+descr.vars <- c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2",
+                "cvtd_timestamp", "new_window", "num_window", "classe")
+descr.index <- which(colnames(TRAIN) %in% descr.vars)
+TRAIN[, -descr.index] <- sapply(TRAIN[, -descr.index], as.numeric)
+
+# obs 4289 is crazy extreme for gyros_dumbbell_x_y_and_z and gyros_forearm_x_y_and_z
+# obs 7422 is crazy extreme for "magnet_dumbbell_y"
+TRAIN <- TRAIN[-c(4289, 7422), ]
+```
+
+There were some variables in the training set that had a huge amount of missing values (19216 | 98%). *summary()* showed NA values for many numeric/interger variables, and empty ("") values for those numeric variables read as factors. It is unclear whether these missing values are observations that were not measured, or represent when the accelerometer was still. Unfortunately, these variables with 98% missing values were useless for model predictions, and were thus removed. This reduced the dataset from 160 variables to 53. All other variables had complete observations (no missing values).
+
+```{r Data Partitioning}
+### 
+# given the size of the dataset, a validation set will be partitioned
+set.seed(2118)
+index <- createDataPartition(TRAIN$classe, p = 0.7, list = F)
+tn <- TRAIN[index, ] #training
+vn <- TRAIN[-index, ] #validation
+
+# training and validation sets without descriptive vars but with *classe* 
+# for running models
+tn.model <- tn[, -descr.index[-8]]
+vn.model <- vn[, -descr.index[-8]]
+```
+
+Descriptive variables (i.e. index, timestamps, user) were kept as factor or character variables, and all other measurement variables were changed to numeric. The data was then partitioned into training (70%) and validation (30%) datasets with randomization seed 2118.
+
+The data was explored through different techniques (e.g. correlation matrix, pairs plots). Using boxplots, extreme outliers were found in observations 4289 and 7422 and removed. Also, the boxplots were facetted per *classe* value (A-E) for every numeric variables (see Figure 1). 
+
+```{r, echo=TRUE}
+boxplot(magnet_arm_x ~ classe, tn.model)
+```
+
+The boxplots facilitated spotting variations between *classe* per every variable. For example, variable *magnet_arm_x* had different distributions of values per *classe*, particularly for *classe* D, while variable *yaw_forearm* has almost no variation between *classe* except for a significant distinction in *classe* C. Reading all 52 boxplots, a list of variables was organized for observed variation per classe. This list was then used to determine which variables to include in the model. Granted, this is a quite manual way of determining variables, but the course did not covered automatic procedures for variable selection. Luckily, the data was not that high dimensional.
+
+Finally, it is crucial to NOT include the *X (index)* column in any model, as this variable corresponds perfectly with *classe*. Apparently, the different exercise errors were performed (or at least tabulated) in order, as shown by Figure 2.
+
+```{r}
+plot(classe ~ X, tn)
+mtext(text = c("all A", "all B", "all C", "all D", "all E"),
+      adj = seq(0.1, 0.9, 1/5))
+```
+
+## Model Selection
+
+Evidently, the response variable *classe* is categorical; it can only assume 5 categories. Thus, a classification model is necessary. The Classification and Regression Trees (CART) model was first selected to observe the explanatory weight of different combinations of variables. However, the accuracy of the model was never of 50%. A more powerful model was needed. With much trial and error, great aid from the September Machine Learning class discussion forums, and a review of video lectures, the Random Forest model was selected. 
+
+When plotted in boxplots, the variables below showed the greatest visual differences between *classe*. These observed differences can be statistically corroborated with a Tukey test. (Because this topic was not covered in previous classes, I will refrain from using this test.) Although there were other variables that showed some differences between boxplots by *classe* it is important to maintain parsimony and computational efficiency in the models, thus, only these seven variables were chosen.
+
+```{r}
+differ.cols <- c(24, 26, 32, 35, 37, 40, 51)
+colnames(tn.model[, differ.cols])
+```
+
+## Model Performance
+
+```{r, echo=TRUE, cache=TRUE}
+differ.form <- as.formula(paste("classe ~ ", 
+                                paste(colnames(tn.model)[differ.cols], 
+                                      collapse = " + ")))
+differRF <- train(differ.form, method = "rf", tn.model)
+confMx.differRF <- confusionMatrix(data = predict(differRF, tn.model), 
+                                   reference = tn.model$classe, positive = "A")
+confMx.differRF$table
+```
+
+The random forest model does excellently well this first time. It might seem to have overfitted, given its 100% accuracy. In order to corroborate, the model will be first cross validated by resampling inside the training model, and then cross validated with the validation data (30% of the original training data). This second cross validation has the objective of calculating an out-of-sample error, in order to estimate the error when usind the test data. Ideally, this calculation would be used to better the model in order to achieve the lowest out-of-sample error when applying the model to the test data.
+
+## Cross Validation
+
+The model will be retrained with a 10-fold cross validation repeated 5 times.
+
+```{r, echo=TRUE, cache=TRUE}
+ctrl <- trainControl("reapeatedcv", repeats = 5)
+differRFcv <- train(differ.form, method = "rf", tn.model, tnControl = ctrl)
+confMx.differRFcv <- confusionMatrix(data = predict(differRFcv, tn.model), 
+                                   reference = tn.model$classe, positive = "A")
+confMx.differRFcv$table
+```
+
+Not surprisingly, the averaged model for these 5 time 10-fold cross validation performs just as efficient as the original model. In a sense, the 5 repetitions were redundant, given the Random Forest model already bootstraps through different classification trees subsets. Now, let us calculate the out-of-sample error for both the original and the cross-validated model using the validation data.
+
+## Out Of Sample Error and Conclusion
+
+```{r, echo=TRUE, cache=TRUE}
+vn.differRF <- confusionMatrix(data = predict(differRF, vn.model), 
+                               reference = vn.model$classe, positive = "A")
+vn.differRFcv <- confusionMatrix(data = predict(differRFcv, vn.model), 
+                               reference = vn.model$classe, positive = "A")
+vn.differRF$table
+vn.differRF$overall[1]
+vn.differRFcv$table
+vn.differRFcv$overall[1]
+```
+
+Both models perform very well, with a less than 7% out-of-sample error. They do not differ much in any classifier performance (i.e. accuracy, specificity, class errors, etc.), which reiterates the redundancy of repeating the 10-fold cross validation 5 times. The Random Forest model performs excellently well by its own bootstrapping. Being conservative, this model should always perform with less than a 10% out-of-sample error when working with this type of 5 *classe* exercise data. 
+
